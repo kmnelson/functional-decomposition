@@ -1,11 +1,14 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse, os, sys
-import numpy             as np
+import torch
+import numpy as np
 import matplotlib.pyplot as plt
 
 from   numpy.lib.format import open_memmap
 from   math             import sqrt, pi
+
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Parameters for test PDF function
 par    = [  9.50700e+04,
@@ -28,21 +31,21 @@ def mkCache(base, name, shape, **kwargs):
     except OSError:
         pass
 
-    return { k : open_memmap(os.path.join(opath, k + ".npy"), dtype=t, mode='w+', shape=shape) for k, t in kwargs.items() }
+    return { k : torch.from_numpy(open_memmap(os.path.join(opath, k + ".npy"), dtype=t, mode='w+', shape=shape)) for k, t in kwargs.items() }
 
 # Gaussian PDF
 def Gauss(x, u, s):
-    return np.exp( -0.5*( (x-u)/s )**2 ) / sqrt(2*pi*s*s)
+    return torch.exp( -0.5*( (x-u)/s )**2 ) / sqrt(2*pi*s*s)
 
 def Exp(x, l):
-    return np.exp(-x/l) / l
+    return torch.exp(-x/l) / l
 
 # Background PDF
 def G_dijet5Param(x, com, *p):
   x[x < 0]   = 0
   x[x > com] = com
   mX         = x / com
-  e          = p[2] + p[3]*np.log(mX) + p[4]*np.log(x)**2
+  e          = p[2] + p[3]*torch.log(mX) + p[4]*torch.log(x)**2
 
   return p[5]*Gauss(x,p[6],p[7]) + p[0] * (1-mX)**p[1] * mX**e
 
@@ -61,15 +64,15 @@ ArgP.add_argument('--show',    action='store_true',          help="Show histogra
 ArgC    = ArgP.parse_args()
 
 ###### Initialize the variable and weight arrays.
-types   = { ArgC.varname: np.float,
-            ArgC.wgtname: np.float,
+types   = { ArgC.varname: np.float32,
+            ArgC.wgtname: np.float32,
           }
 outSets = mkCache(ArgC.base, ArgC.setname, (ArgC.size,), **types)
 wgt     = outSets[ArgC.wgtname]
 var     = outSets[ArgC.varname]
 
 # get acceptance ratio
-x       = np.linspace(ArgC.varcut, ArgC.com, 1e6)
+x       = torch.linspace(ArgC.varcut, float(ArgC.com), int(1e6), device=device)
 M       = G_dijet5Param(x, ArgC.com, *par) / Exp(x - ArgC.varcut, eLambda)
 M       = 1.01*M.max()
 
@@ -77,13 +80,13 @@ M       = 1.01*M.max()
 n       = 0
 ns      = 0
 
-print
-print "======> FD TEST DATA GENERATOR <======"
-print
+print()
+print("======> FD TEST DATA GENERATOR <======")
+print()
 
 while n < ArgC.size:
-    x    = ArgC.varcut + np.random.exponential(scale=eLambda, size=ArgC.cksize)
-    u    = np.random.uniform(size=ArgC.cksize)
+    x    = ArgC.varcut - torch.log(1 - torch.rand(ArgC.cksize, device=device))/eLambda
+    u    = torch.rand(ArgC.cksize, device=device)
     v    = G_dijet5Param(x, ArgC.com, *par)
 
     keep = x[M * u < v / Exp(x - ArgC.varcut, eLambda) ]
@@ -95,14 +98,15 @@ while n < ArgC.size:
     n   += num
     ns  += 1
 
-    print "\rGenerating: % 14d / % 9d" % ( n, ArgC.size ), ; sys.stdout.flush()
-print
-print "PDF Ratio: % 27.3f" % M
-print "Gen Efficiency: %22.3f" % ( float(ArgC.size) / float(ns*ArgC.cksize) )
-print
+    print("\rGenerating: % 14d / % 9d" % ( n, ArgC.size ))
+    sys.stdout.flush()
+print()
+print("PDF Ratio: % 27.3f" % M)
+print("Gen Efficiency: %22.3f" % ( float(ArgC.size) / float(ns*ArgC.cksize) ))
+print()
 
 if ArgC.show:
-    plt.hist(var, 500, facecolor='g', alpha=0.75)
+    plt.hist(var.cpu(), 500, facecolor='g', alpha=0.75)
     plt.xlabel(ArgC.varname)
     plt.ylabel('Events')
     plt.title('Generated Events')
