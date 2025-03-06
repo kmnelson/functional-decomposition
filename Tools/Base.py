@@ -23,10 +23,16 @@ This module consists of four classes:
 
   Transform:        An abstract base class to implement operations to transform
                     between different sets of basis hyperparameters.
+
+
+This is re-implemented to use pytorch so that the sensitivity computed herein
+can be differentiated and optimized using e.g. Adam in a DNN.
+
+Re-implemented by Kevin Nelson
 '''
 
+import torch
 import numpy               as np
-import numexpr             as ne
 import Tools.CacheMgr      as Cache
 
 from   Tools.PrintMgr      import *
@@ -35,6 +41,7 @@ from   scipy.linalg        import solve
 from   multiprocessing     import Pool
 from   abc                 import abstractmethod
 from   os                  import environ
+from   torch               import Tensor
 
 class ParametricObject(object):
     '''
@@ -135,10 +142,13 @@ class DecompFactory(ParametricObject):
     DecompFactory additionally provides some convenience methods for decomposing datasets
     and calculating covariance matrices.
     '''
-    _param    = ("Nbasis", "Nxfrm", "Ncheck")
+    _param    = ("Nbasis", "Nxfrm", "Ncheck", "device",)
 
     @abstractmethod
-    def Fn     (self, x, w, **kw):
+    def Fn     (self,
+                x: Tensor, 
+                w: Tensor, 
+                **kw):
         '''
         Return a subclass of Basis that implements an orthonormal basis function.
         'x' is an ndarray with the x-values at which to evaluate the function.
@@ -152,7 +162,9 @@ class DecompFactory(ParametricObject):
         return
 
     @abstractmethod
-    def MxForm (self, *mom, **kw):
+    def MxForm (self, 
+                *mom: Tensor, 
+                **kw):
         '''
         Return a subclass of Basis that takes in a list of moment vectors and
         returns the corresponding moment matrices row-by-row.  Each positional
@@ -187,7 +199,11 @@ class DecompFactory(ParametricObject):
         '''
         return
 
-    def MomMx  (self, Mom, i, j, **kwargs):
+    def MomMx  (self, 
+                Mom: Tensor, 
+                i: int, 
+                j: int, 
+                **kwargs):
         '''
         Return the matrix form of Mom using the fast matrix cache stored in
         this DecompFactory object. This method is only able to use 'Nxfrm'
@@ -205,9 +221,10 @@ class DecompFactory(ParametricObject):
         out = kwargs.get("out", None)
         N   = kwargs.get("N", self["Nxfrm"])
         j   = min(j, self.TDot.shape[-1])
-        return np.dot( self.TDot[:N,:N,i:j], Mom[i:j], out=out)
+        return torch.dot( self.TDot[:N,:N,i:j], Mom[i:j], out=out)
 
-    def MxTensor(self, *Mom):
+    def MxTensor(self, 
+                 *Mom: Tensor):
         '''
         Return the matrix form of each moment vector listed in the positional
         arguments.  This uses the full MxForm machinery, so it can work on
@@ -215,25 +232,28 @@ class DecompFactory(ParametricObject):
         is N by N, where N is the length of the first positional argument.
         '''
         Nb  = Mom[0].size
-        Ct  = np.zeros((Nb, Nb, len(Mom)))
+        Ct  = torch.zeros((Nb, Nb, len(Mom)))
         for r in self.MxForm(*Mom, Nbasis=Nb):
-            Ct[r.N]  += r.Values().T
+            Ct[r.N]  += torch.transpose(r.Values(), 0, 1)
         return Ct
 
-    def CovMatrix(self, Mom):
+    def CovMatrix(self, 
+                  Mom: Tensor):
         '''
         Return the covariance matrix association with the moment vector Mom.
         This method works on moment vectors of any length.  The returned
         covariance matrix is N by N, where N is the length of Mom.
         '''
-        Nb      = Mom.size
-        Ct      = -np.outer(Mom[:Nb], Mom[:Nb])
+        Nb      = len(Mom)
+        Ct      = -torch.outer(Mom[:Nb], Mom[:Nb])
         Ct[0,0] = 1
         for r in self.MxForm(Mom, Nbasis=Nb):
             Ct[r.N]  += r.Values()[0]
         return Ct
 
-    def OpMatrix(self, N, **kwargs):
+    def OpMatrix(self, 
+                 N: int, 
+                 **kwargs):
         '''
         Create and return the fast matrix cache.  This calculates the N by N
         matrix form of each basis function, and returns the result in a form
@@ -247,14 +267,18 @@ class DecompFactory(ParametricObject):
         One of CovMatrix, MomMx, or MxTensor probably do what you want.
         '''
         M = kwargs.get("M", N)
-        v = np.zeros((N,N,M))
-        F = self.MxForm( *[x for x in np.eye(N)[:M]], Nbasis=N )
+        v = torch.zeros((N,N,M))
+        F = self.MxForm( *[x for x in torch.eye(N, device=self['device'])[:M]], Nbasis=N )
 
         for x in F:
-           v[x.N] = x.Values().T
+           v[x.N] = torch.transpose(x.Values(), 0, 1)
         return v
 
-    def Decompose(self, x, w, cksize=2**20, **kw):
+    def Decompose(self, 
+                  x: Tensor, 
+                  w: Tensor, 
+                  cksize: int = 2**20,
+                  **kw):
         '''
         Given a dataset 'x' of values with weights 'w', compute the moments of
         that dataset.  Both 'x' and 'w' should be one-dimensional ndarrays
@@ -270,7 +294,7 @@ class DecompFactory(ParametricObject):
         '''
         Nb   = kw.pop("Nbasis", 0)
         Fn   = self.Fn(x[:cksize+1], w[:cksize+1], Nbasis=Nb if Nb > 0 else self["Nbasis"], **kw)
-        Mom  = np.zeros( (Fn["Nbasis"],) )
+        Mom  = torch.zeros( (Fn["Nbasis"],) )
 
         for i in range(0, x.size, cksize): 
             pdot()
@@ -280,7 +304,13 @@ class DecompFactory(ParametricObject):
         return Mom
 
     @Cache.Element("{self.CacheDir}", "Decompositions", "{self}", "{2:s}-{Nbasis}.npy")
-    def CachedDecompose(self, x, w, name, cksize=2**20, Nbasis=0, **kwargs):
+    def CachedDecompose(self, 
+                        x: Tensor,
+                        w: Tensor, 
+                        name: str, 
+                        cksize: int =2**20, 
+                        Nbasis: int =0, 
+                        **kwargs):
         '''
         Given a dataset 'x' of values with weights 'w', compute the moments of
         that dataset.  Both 'x' and 'w' should be one-dimensional ndarrays
@@ -308,7 +338,6 @@ class DecompFactory(ParametricObject):
         self.FDDir      = environ.get('FD_DIR', ".")
 
         ParametricObject.__init__(self, **kwargs)
-        ne.set_num_threads(self.Nthread)
 
         self.TDot       = self.OpMatrix( self["Nxfrm"] )
 
@@ -338,13 +367,13 @@ class Basis(ParametricObject):
     See Tools.OrthExp for several examples of different subclasses that utilize
     the 'Basis' object.
     '''
-    _param      = ("Nbasis", )
+    _param      = ("Nbasis", "device", )
 
     # User-facing functions.
     #def Values(self):                 return self.t[ self.N % 2 ] * np.sqrt(self.NormSq(self.N))
 
     # Return a zero ndarray of the appropriate shape and type.
-    def Zeros (self, shape=()):       return np.zeros(shape + (1,))
+    def Zeros (self, shape=()):       return torch.zeros(shape + (1,), device=self['device'])
 
     # The zero'th value of the basis.
     @abstractmethod
@@ -390,7 +419,7 @@ class Basis(ParametricObject):
       
         return self
 
-    def next(self):
+    def __next__(self):
         next    = self['t'][ (self.N + 1) % 2 ]
         this    = self['t'][ (self.N    ) % 2 ]
         prev    = self['t'][ (self.N - 1) % 2 ]
@@ -494,7 +523,9 @@ class Transform(ParametricObject):
     '''
     _param = ( )
 
-    def __call__(self, *vec, **kwargs):
+    def __call__(self, 
+                 *vec: Tensor, 
+                 **kwargs):
         '''
         Transform a list of moments vectors from the current hyperparameters
         into an alternate choice of hyperparameters.  The current parameters
@@ -510,23 +541,29 @@ class Transform(ParametricObject):
 
         ini = kwargs        if inv else self.ParamVal
         fin = self.ParamVal if inv else kwargs
-        ret = np.stack(vec, axis=1)[:self["Nxfrm"]]
+        ret = torch.stack(vec, axis=1)[:self["Nxfrm"]]
 
         arg = self.XfPar(fin, ini)
-        mx  = sum( arg[p] * self.KMx[p].T for p in self._param )
+        mx  = sum( arg[p] * torch.transpose(self.KMx[p], 0, 1) for p in self._param )
         ret = expm_multiply( mx, ret )
 
-        return tuple(ret.T)
+        return tuple(torch.transpose(ret, 0, 1))
 
     @Cache.AtomicElement("{self.Factory.FDDir}", "data", "ele-cache-{name:s}", "{0:d}-{1:d}.json")
-    def Ele(self, n, m, **kwargs):
+    def Ele(self, 
+            n: int, 
+            m: int, 
+            **kwargs):
         '''
         Compute element (n, m) of self.O . H . self.D where H is a Hankel matrix.
         H is specified by passing it's diagonal as the kwarg 'h'.
         '''
         h   = kwargs.get("h")
-        v   = np.outer(self.O[n][::-1], self.D[m])
-        s   = [ np.trace(v, offset=k) for k in range(-v.shape[0]+1, v.shape[1]) ]
+        print(type(self.D[m]))
+        v   = torch.outer(self.O[n][::-1], self.D[m])
+        s   = [ torch.trace(v[:-k, k:]) \
+                if k > 0 else torch.trace(v[k:, :-abs(k)]) \
+                for k in range(-v.shape[0]+1, v.shape[1]) ] # trace with offset k
 
         return np.dot(h[:len(s)], s) * self.Norm(n, m)
 
@@ -564,7 +601,7 @@ class Transform(ParametricObject):
             p  = Pool( self.Factory.Nthread )
             r  = [ p.apply_async(gEle, (n, m), callback=pdot) for n in range(N) for m in range(N) ]
             p.close()
-            r  = np.array([ x.get() for x in r]).reshape((N, N))
+            r  = torch.reshape(torch.tensor([ x.get() for x in r]), (N, N))
             pend()
 
             return r

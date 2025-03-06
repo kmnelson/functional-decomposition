@@ -14,6 +14,7 @@ There are three user-facing functions:
 
 import itertools, json, os
 import numpy           as np
+import torch
 
 from  numpy.lib.format import open_memmap
 from  Tools.PrintMgr   import *
@@ -35,11 +36,11 @@ def _mkPath(pathTpl, *args, **kwargs):
 
 # Atomic file creation method
 def _acreate(filename):
-    fd = os.open(filename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0644)
+    fd = os.open(filename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o0644)
     return os.fdopen(fd, 'wb')
 
 def _fcreate(filename):
-    fd = os.open(filename, os.O_CREAT |             os.O_WRONLY, 0644)
+    fd = os.open(filename, os.O_CREAT |             os.O_WRONLY, 0o0644)
     return os.fdopen(fd, 'wb')
 
 # Save a sparse symmetric array.
@@ -113,7 +114,7 @@ def _fsave(file, Ext, res):
     elif Ext== ".json":
         json.dump(res, file)
     else:
-        print "Unknown file extension '%s' from file '%s'." % (Ext, Name)
+        print("Unknown file extension '%s' from file '%s'." % (Ext, Name))
         
 def _fload(Ext, FullPath):
     if Ext == ".npy":
@@ -122,7 +123,7 @@ def _fload(Ext, FullPath):
         with open(FullPath, 'rb') as file:
             return json.load(file)
     else:
-        print "Unknown file extension '%s' from file '%s'." % (Ext, Name)
+        print("Unknown file extension '%s' from file '%s'." % (Ext, Name))
         raise ValueError
 
 def Element(*pathTpl):

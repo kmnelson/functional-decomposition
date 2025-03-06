@@ -86,7 +86,7 @@ from   math                import log, sqrt, ceil
 from   torch               import Tensor
 
 #### Orthogonal exponentials as functions
-class ExpDecompFn (Base.Basis):
+class LegendreDecompFn (Base.Basis):
     '''
     The orthonormal exponentials as functions.
     
@@ -116,29 +116,28 @@ class ExpDecompFn (Base.Basis):
         for x in En:
             print x.N, x.Moment()
     '''
-    _param = Base.Basis._param + ( "x0", "Lambda", "Alpha" )
+    _param = Base.Basis._param
 
     # User-facing functions.
-    def Values(self):           return self['t'][ self.N % 2 ] * sqrt(self.NormSq(self.N)) * self['xf']
+    def Values(self):           return self['t'][ self.N % 2 ] * torch.sqrt(self.NormSq(self.N)) * self['xf']
 
     def Zeros (self, shape=()): return torch.zeros(shape + self['x'].shape, device=self['device'])
 
-    def NormSq(self, N):        return 2. / N if N > 0 else 0
-    def Base0 (self, out):      out[:] = 0
+    def NormSq(self, N):        return 1.0
+    def Base0 (self, out):      out[:] = 1.0
     def Base1 (self, out):      out[:] = self['rz']
-    def Raise (self, out):      return torch.exp( -(self['x']-self['x0']) * self['xf'] / self['Alpha'], out=out)
-    def Xfrm  (self, out):      return torch.pow((self['Alpha']/self['Lambda']) * ((self['x']-self['x0'])/self['Lambda']), (self['Alpha']-1), out=out)
+    def Raise (self, out):      return self['x']
+    def Xfrm  (self, out):      return torch.ones_like(self['x']) 
 
     # The recurrence relation itself.
     def Recur(self, 
               N: int, 
-              En: float,
-              Ep: float,
+              Pn: float,
+              Pp: float,
               out: Tensor):
-        A      = float(4*N + 2) / N
-        B      = float(4*N)     / (2*N - 1)
-        C      = float(2*N + 1) / (2*N - 1)
-        out[:] = A*self['rz']*En - B*En - C*Ep
+        A      = float(2*N + 1) / (N + 1)
+        B      = float(N)       / (N + 1)
+        out[:] = A*self['rz']*Pn - B*Pp
 
     def Moment(self): return torch.dot(self['t'][ self.N % 2 ], self['w']) * sqrt(self.NormSq(self.N))
 
@@ -158,7 +157,7 @@ class ExpDecompFn (Base.Basis):
         self['w'] = w
 
 #### Class to elevate a decomposition to it's matrix form
-class ExpDecompMxForm (Base.Basis):
+class LegendreDecompMxForm (Base.Basis):
     '''
     A class to elevate a decomposition from its vector form to its matrix form.
 
@@ -191,15 +190,15 @@ class ExpDecompMxForm (Base.Basis):
     def Values(self):           return self['t'][ self.N % 2 ][:,1:self["Nbasis"]+1]
     def Zeros (self, shape=()): return torch.zeros(shape + self['x'].shape, device=self['device'])
 
-    def Base0 (self, out):      out[:] = 0
+    def Base0 (self, out):      out[:] = self['x']
     def Base1 (self, out):      out[:] = 0; self.Recur(0, self['x'], self['t'][0], out)
     def Raise (self, out):
-        n           = torch.arange(self["Nrow"]-2, dtype=self['x'].dtype)
+        n           = torch.arange(self["Nrow"]-2, dtype=self['x'].dtype, device=self['device'])
 
         out         = torch.zeros((2, self["Nrow"]), device=self['device'])
-        out[0,1:-1] = torch.sqrt(n*(n+1)) / (      2*(2*n+1) ) #sub/sup diagonal
-        out[1,1:-1] =              2*n**2 / ((2*n-1)*(2*n+1) ) #diagonal
-        out[1,-2]   = 0
+        # main diagonal is zero
+        out[0,1:-1] = torch.divide(n,   2*n + 1) # hat{z}_n_n-1 off diagonal
+        out[1,1:-1] = torch.divide(n+1, 2*n + 1) # hat{z}_n_n+1 off diagonal
 
         return out
     def Xfrm  (self, out):      return None
@@ -212,29 +211,23 @@ class ExpDecompMxForm (Base.Basis):
               out):
         N = float(N)
         if N > 0:
-            e  = sqrt(     N / (N+1) )
-            f  = sqrt( (N-1) / (N+1) )
-
-            A  = e * (4*N + 2) / N
-            B  = e * (4*N)     / (2*N - 1)
-            C  = f * (2*N + 1) / (2*N - 1)
+            A  = (2*N + 1) / (N + 1)
+            B  = (N)       / (N + 1)
         else:
-            A,B,C = 2.0,0.0,0.0
+            A,B = 1.0,0.0
 
-        dg  = self['rz'][1,1:-1]
-        us  = self['rz'][0,1:-1]
-        ds  = self['rz'][0,0:-2]
+        du  = self['rz'][1,1:-1] # n+1 off diagonal
+        dl  = self['rz'][0,1:-1] # n-1 off diagonal
 
-        x   = En[:,1:-1]
         u   = En[:,2:  ]
-        d   = En[:, :-2]
+        l   = En[:,:-2]
         p   = Ep[:,1:-1]
 
         if out is not None:
-            out[:,1:-1] = A*(dg*x + us*u + ds*d) - B*x - C*p
+            out[:,1:-1] = A*(du*u + dl*l) - B*p
             return out
         else:
-            return A*(dg*x + us*u + ds*d) - B*x - C*p
+            return A*(du*u + dl*l) - B*p
 
     def __init__(self, *mom, **kwargs):
         Base.Basis.__init__(self, **kwargs)
@@ -249,8 +242,8 @@ class ExpDecompMxForm (Base.Basis):
         for n,x in enumerate(mom):
             self['x'][n,1:len(x)+1] = x
 
-#### Decomposition of a simple exponential e**(-x/Lambda) 
-class ExpPrior (Base.Basis):
+#### Decomposition of a flat distribution
+class LegendrePrior (Base.Basis):
     '''
     Return the moments of a distribution consisting of only the first
     orthonormal exponential, properly normalized.
@@ -263,7 +256,7 @@ class ExpPrior (Base.Basis):
         return 1./sqrt(2)
 
 #### Transformation matrix generator for orthogonal exponentials.
-class ExpDecompTransform(Base.Transform):
+class LegendreDecompTransform(Base.Transform):
     '''
     Transformation object for the orthonormal exponentials.
 
@@ -332,7 +325,7 @@ class ExpDecompTransform(Base.Transform):
 
 
 #### A decomposer factory using the orthonormal exponentials
-class ExpDecompFactory ( Base.DecompFactory ):
+class LegendreDecompFactory ( Base.DecompFactory ):
     '''
     A factory object for the orthonormal exponentials.
 
@@ -365,14 +358,27 @@ class ExpDecompFactory ( Base.DecompFactory ):
     the implementation of the orthonormal exponentials.
     '''
     _param    = tuple(set( Base.DecompFactory._param
-                          + ExpDecompFn._param
-                          + ExpDecompMxForm._param
-                          + ExpPrior._param))
-    _fitparam = ("Alpha", "Lambda")
+                          + LegendreDecompFn._param
+                          + LegendreDecompMxForm._param
+                          + LegendrePrior._param))
+    _fitparam = ( )
 
     # Methods to create the function, matrix and weight objects with correct parameters.
-    def Fn    (self, x, w, **kw): return ExpDecompFn        (x, w, **self._arg(kw) )
-    def MxForm(self, *x,   **kw): return ExpDecompMxForm    (*x,   **self._arg(kw) )
-    def Pri   (self,       **kw): return ExpPrior           (      **self._arg(kw) )
-    def Xfrm  (self,       **kw): return ExpDecompTransform (      **self._arg(kw) )
+    def Fn    (self, x, w, **kw): return LegendreDecompFn        (x, w, **self._arg(kw) )
+    def MxForm(self, *x,   **kw): return LegendreDecompMxForm    (*x,   **self._arg(kw) )
+    def Pri   (self,       **kw): return LegendrePrior           (      **self._arg(kw) )
+    def Xfrm  (self,       **kw): return LegendreDecompTransform (      **self._arg(kw) )
  
+    def CovMatrix(self,
+                  Mom: Tensor):
+        '''
+        Return the covariance matrix association with the moment vector Mom.
+        This method works on moment vectors of any length.  The returned
+        covariance matrix is N by N, where N is the length of Mom.
+        '''
+        Nb      = len(Mom)
+        Ct      = -torch.outer(Mom[:Nb], Mom[:Nb])
+        Ct[0,0] = 0
+        for r in self.MxForm(Mom, Nbasis=Nb):
+            Ct[r.N]  += r.Values()[0]
+        return Ct

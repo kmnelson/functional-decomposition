@@ -1,14 +1,15 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
-import os,argparse, ConfigParser
+import os,argparse,configparser
 
-import numpy             as np
-import matplotlib.pyplot as plt
+import torch
+from matplotlib import pyplot as plt
 
 from   Tools.OrthExp     import ExpDecompFn
 
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 end    = 10        # Maximum value to evaluate
-Npt    = int(1e6)  # Number of points to use
+Npt    = int(1e3)  # Number of points to use
 Nbasis = 101       # Number of basis elements to evaluate
 
 toplot = {   1 : {'color': 'green'},
@@ -18,7 +19,7 @@ toplot = {   1 : {'color': 'green'},
              0 : {'color': 'black', 'ls': '--'},
          }
 
-np.set_printoptions(precision=3, linewidth=160)
+torch.set_printoptions(precision=3, linewidth=160)
 
 ######
 # Parse command line parameters and config files
@@ -30,7 +31,7 @@ ArgP.add_argument('--logx', action="store_true",                    help="Set x 
 ArgP.add_argument('--save', type=str, default="Output/orthexp.pdf", help="Filename to save plot.")
 ArgC      = ArgP.parse_args()
 
-Config    = ConfigParser.ConfigParser()
+Config    = configparser.ConfigParser()
 Config.optionxform = str
 Config.read( os.path.join(ArgC.base, "base.conf") )
 
@@ -39,17 +40,17 @@ try:            plt.style.use( PlotStyle )
 except IOError: plt.style.use( os.path.join(ArgC.base, PlotStyle) )
 
 
-x      = np.linspace(0.001, end, Npt)
-w      = np.ones((Npt,)) / Npt
+x      = torch.linspace(0.001, end, Npt, device=device)
+w      = torch.ones((Npt,), device=device) / Npt
 
-Decomp = ExpDecompFn( x=x, w=w, Nbasis=max(toplot.keys())+1, Lambda=1, x0=0, Alpha=1.0 )
+Decomp = ExpDecompFn( x=x, w=w, Nbasis=max(toplot.keys())+1, Lambda=1, x0=0, Alpha=1.0, device=device )
 
 ######
 for D in Decomp:
     if D.N in toplot:
-        plt.plot(x, Decomp.Values(), zorder=-D.N, label='$E_{%d}\\left(z\\right)$' % D.N, **toplot[D.N])
-    print D.Values()
-    print "%d: %f" % (D.N, Decomp.Moment())
+        plt.plot(x.cpu(), Decomp.Values().cpu(), zorder=-D.N, label='$E_{%d}\\left(z\\right)$' % D.N, **toplot[D.N])
+    print(D.Values())
+    print("%d: %f" % (D.N, Decomp.Moment()))
 
 plt.xlabel("z")
 plt.ylabel("Arbitrary Units")
@@ -64,7 +65,7 @@ plt.tight_layout()
 try:
     plt.savefig(ArgC.save)
 except IOError:
-    print "Directory for save does not exist or cannot be written to."
+    print("Directory for save does not exist or cannot be written to.")
     
 if ArgC.show:
     plt.show()

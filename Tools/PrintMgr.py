@@ -56,7 +56,7 @@ def pnew(str):
     global _Nline
     if not _verbose: return
 
-    print str
+    print(str)
     _Nline = 0
 
 def pini(str, interval = 1):
@@ -64,7 +64,7 @@ def pini(str, interval = 1):
     if not _verbose: return
     
     str = _str_bl % str
-    print str,
+    print(str)
     sys.stdout.flush()
     _Ndot = 0
     _Nint = interval
@@ -84,8 +84,8 @@ def pdot(x=None, pchar="."):
     sys.stdout.flush()
 
     if q > 0 and q % _Ngap == 0:
-        print " (%.2fs)" % (time.time() - _Ti)
-        print " " * 22,
+        print(" (%.2fs)" % (time.time() - _Ti))
+        print(" " * 22,)
         _Nline += 1
 
     return x
@@ -94,7 +94,7 @@ def pstr(str):
     global _Ndot, _Nline
     if not _verbose: return
 
-    print str
+    print(str)
     _Nline += len(str.split("\n"))
 
 def pend(str=""):
@@ -105,8 +105,8 @@ def pend(str=""):
 
     if q > 0 and q % _Ngap == 0:
         return
-    print _str_set % loc,
-    print "%s (%.2fs)" % (str, time.time() - _Ti)
+    print(_str_set % loc)
+    print("%s (%.2fs)" % (str, time.time() - _Ti))
     _Nline += 1
 
     sys.stdout.flush()
@@ -115,7 +115,7 @@ def prst():
     global _Nline
     if not _verbose: return
     if _Nline == 0:  return
-    print '\x1b[%dF' % _Nline,
+    print('\x1b[%dF' % _Nline,)
     _Nline = 0
 
 def pstage(str):
@@ -130,7 +130,7 @@ def pstage(str):
 
           if verbose:
               t2  = time.time()
-              print "Total time: %.2fs" % (t2 - t1)
+              print("Total time: %.2fs" % (t2 - t1))
           return r
       return wrap
   return decorator
