@@ -119,7 +119,7 @@ class LegendreDecompFn (Base.Basis):
     _param = Base.Basis._param
 
     # User-facing functions.
-    def Values(self):           return self['t'][ self.N % 2 ] * torch.sqrt(self.NormSq(self.N)) * self['xf']
+    def Values(self):           return self['t'][ self.N % 2 ] * sqrt(self.NormSq(self.N)) * self['xf']
 
     def Zeros (self, shape=()): return torch.zeros(shape + self['x'].shape, device=self['device'])
 
