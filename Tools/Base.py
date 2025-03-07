@@ -36,7 +36,7 @@ import numpy               as np
 import Tools.CacheMgr      as Cache
 
 from   Tools.PrintMgr      import *
-from   scipy.sparse.linalg import expm_multiply
+from   torch.linalg        import matrix_exp
 from   scipy.linalg        import solve
 from   multiprocessing     import Pool
 from   abc                 import abstractmethod
@@ -221,7 +221,8 @@ class DecompFactory(ParametricObject):
         out = kwargs.get("out", None)
         N   = kwargs.get("N", self["Nxfrm"])
         j   = min(j, self.TDot.shape[-1])
-        return torch.dot( self.TDot[:N,:N,i:j], Mom[i:j], out=out)
+        Mom = Mom.to(self.TDot.dtype)
+        return torch.tensordot( self.TDot[:N,:N,i:j], Mom[i:j], dims=1, out=out)
 
     def MxTensor(self, 
                  *Mom: Tensor):
@@ -232,7 +233,7 @@ class DecompFactory(ParametricObject):
         is N by N, where N is the length of the first positional argument.
         '''
         Nb  = Mom[0].size
-        Ct  = torch.zeros((Nb, Nb, len(Mom)))
+        Ct  = torch.zeros((Nb, Nb, len(Mom)), device=self['device'])
         for r in self.MxForm(*Mom, Nbasis=Nb):
             Ct[r.N]  += torch.transpose(r.Values(), 0, 1)
         return Ct
@@ -267,7 +268,7 @@ class DecompFactory(ParametricObject):
         One of CovMatrix, MomMx, or MxTensor probably do what you want.
         '''
         M = kwargs.get("M", N)
-        v = torch.zeros((N,N,M))
+        v = torch.zeros((N,N,M), device=self['device'])
         F = self.MxForm( *[x for x in torch.eye(N, device=self['device'])[:M]], Nbasis=N )
 
         for x in F:
@@ -294,16 +295,16 @@ class DecompFactory(ParametricObject):
         '''
         Nb   = kw.pop("Nbasis", 0)
         Fn   = self.Fn(x[:cksize+1], w[:cksize+1], Nbasis=Nb if Nb > 0 else self["Nbasis"], **kw)
-        Mom  = torch.zeros( (Fn["Nbasis"],) )
+        Mom  = torch.zeros( (Fn["Nbasis"],), device=self['device'])
 
-        for i in range(0, x.size, cksize): 
+        for i in range(0, x.numel(), cksize): 
             pdot()
             Fn.Reinit( x[i:i+cksize+1 ], w[i:i+cksize+1] )
             for D in Fn: Mom[D.N] += D.Moment()
 
         return Mom
 
-    @Cache.Element("{self.CacheDir}", "Decompositions", "{self}", "{2:s}-{Nbasis}.npy")
+    @Cache.Element("{self.CacheDir}", "Decompositions", "{self}", "{2:s}-{Nbasis}.pt")
     def CachedDecompose(self, 
                         x: Tensor,
                         w: Tensor, 
@@ -545,7 +546,7 @@ class Transform(ParametricObject):
 
         arg = self.XfPar(fin, ini)
         mx  = sum( arg[p] * torch.transpose(self.KMx[p], 0, 1) for p in self._param )
-        ret = expm_multiply( mx, ret )
+        ret = matrix_exp( mx ).to(ret.dtype) @ ret
 
         return tuple(torch.transpose(ret, 0, 1))
 
@@ -559,7 +560,6 @@ class Transform(ParametricObject):
         H is specified by passing it's diagonal as the kwarg 'h'.
         '''
         h   = kwargs.get("h")
-        print(type(self.D[m]))
         v   = torch.outer(self.O[n][::-1], self.D[m])
         s   = [ torch.trace(v[:-k, k:]) \
                 if k > 0 else torch.trace(v[k:, :-abs(k)]) \
@@ -586,7 +586,7 @@ class Transform(ParametricObject):
 
         See Tools.OrthExp.ExpDecompTransform for an example.
         '''
-        @Cache.Element("{self.Factory.FDDir}", "data", "xfrm-cache-{0:s}-{1:d}.npy")
+        @Cache.Element("{self.Factory.FDDir}", "data", "xfrm-cache-{0:s}-{1:d}.pt")
         def wrap(self, name, N):
             pini(name + " xfrm moment")
             global gK
@@ -621,5 +621,5 @@ class Transform(ParametricObject):
         self.Factory    = kwargs["Factory"]
         self.O          = [ self.CoeffOrth (n) for n in range(self["Nxfrm"]) ]
         self.D          = [ self.CoeffDeriv(n) for n in range(self["Nxfrm"]) ]
-        self.KMx        = { n : getattr(self, n)(n, self["Nxfrm"]) for n in self._param }
+        self.KMx        = { n : getattr(self, n)(n, self["Nxfrm"]).to(self.Factory["device"]) for n in self._param }
 

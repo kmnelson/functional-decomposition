@@ -31,7 +31,13 @@ def mkCache(base, name, shape, **kwargs):
     except OSError:
         pass
 
-    return { k : torch.from_numpy(open_memmap(os.path.join(opath, k + ".npy"), dtype=t, mode='w+', shape=shape)) for k, t in kwargs.items() }
+    output = {}
+    for k, t in kwargs.items():
+        tensor = torch.zeros(shape, dtype=t)
+        filepath = os.path.join(opath, k + ".pt")
+        tensor.to(torch.device("cpu")).detach().numpy().tofile(filepath)
+        output[k] = torch.from_file(filepath, shared=True, size=tensor.numel(), dtype=t)
+    return output
 
 # Gaussian PDF
 def Gauss(x, u, s):
@@ -64,8 +70,8 @@ ArgP.add_argument('--show',    action='store_true',          help="Show histogra
 ArgC    = ArgP.parse_args()
 
 ###### Initialize the variable and weight arrays.
-types   = { ArgC.varname: np.float32,
-            ArgC.wgtname: np.float32,
+types   = { ArgC.varname: torch.float32,
+            ArgC.wgtname: torch.float32,
           }
 outSets = mkCache(ArgC.base, ArgC.setname, (ArgC.size,), **types)
 wgt     = outSets[ArgC.wgtname]
@@ -85,7 +91,9 @@ print("======> FD TEST DATA GENERATOR <======")
 print()
 
 while n < ArgC.size:
-    x    = ArgC.varcut - torch.log(1 - torch.rand(ArgC.cksize, device=device))/eLambda
+    x = torch.rand(ArgC.cksize, device=device)
+    x = -torch.log(x) * eLambda
+    x    = ArgC.varcut + x
     u    = torch.rand(ArgC.cksize, device=device)
     v    = G_dijet5Param(x, ArgC.com, *par)
 
@@ -100,6 +108,14 @@ while n < ArgC.size:
 
     print("\rGenerating: % 14d / % 9d" % ( n, ArgC.size ))
     sys.stdout.flush()
+
+
+# save outsets using pickle so that we don't need to store shapes anymore
+opath = os.path.join(ArgC.base, "Data", ArgC.setname)
+for k, mm in outSets.items():
+    filepath = os.path.join(opath, k + ".pt")
+    torch.save(mm.clone().detach(), filepath)
+
 print()
 print("PDF Ratio: % 27.3f" % M)
 print("Gen Efficiency: %22.3f" % ( float(ArgC.size) / float(ns*ArgC.cksize) ))

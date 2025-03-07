@@ -1,7 +1,6 @@
-import ConfigParser
-import numpy as np
-
-from   math  import pi
+import configparser
+import torch
+import math
 
 ###
 # Utility object for reading config files
@@ -60,7 +59,7 @@ class ConfigIter (object):
         if secName != self.DefaultName:
             try:
                 tpl = self.Config.get(secName, "Template")
-            except ConfigParser.NoOptionError:
+            except configparser.NoOptionError:
                 tpl = self.DefaultName
 
             self.readSection(tpl, tgt)
@@ -74,7 +73,7 @@ class ConfigIter (object):
 
         return tgt
 
-    def next(self):
+    def __next__(self):
         '''
         Return the next section in the sequence.
         '''

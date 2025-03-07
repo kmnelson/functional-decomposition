@@ -109,15 +109,19 @@ def SymArray(*pathTpl):
 
 # Cache / calculate a generic numpy array or JSON-serializable object.
 def _fsave(file, Ext, res):
-    if Ext == ".npy":
+    if Ext == ".pt":
+        torch.save (res, file)
+    elif Ext == ".npy":
         np.save  (file, res)
     elif Ext== ".json":
-        json.dump(res, file)
+        file.write(json.dumps(res, indent=4).encode('utf-8'))
     else:
         print("Unknown file extension '%s' from file '%s'." % (Ext, Name))
         
 def _fload(Ext, FullPath):
-    if Ext == ".npy":
+    if Ext == ".pt":
+        return torch.load(FullPath)
+    elif Ext == ".npy":
         return np.load(FullPath, mmap_mode='r')
     elif Ext==".json":
         with open(FullPath, 'rb') as file:

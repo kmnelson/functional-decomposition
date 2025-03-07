@@ -1,5 +1,5 @@
 import itertools
-import numpy                           as np
+import torch
 import matplotlib.pyplot               as plt
 import matplotlib.tri                  as tri
 import matplotlib.cm                   as cm
@@ -8,24 +8,25 @@ from   matplotlib                      import gridspec
 from   matplotlib.backends.backend_pdf import PdfPages
 from   math                            import sqrt, pi, ceil
 from   scipy.stats                     import ks_2samp
-from   scipy.special                   import erf
+from   torch.special                   import erf
 
 from   Tools.Decomp                    import TruncatedSeries
 
 _show = False
+device = 'cpu' # don't need fast computation
 
 # Integrate a function over bins as specified by edges. Npt points per bin.
 def _integrate(func, edges, Npt=100):
     N = len(edges) - 1
-    t = np.zeros((N,))
+    t = torch.zeros((N,), device=device)
 
-    x   = [ np.linspace(edges[n], edges[n+1], Npt + 1) for n in range (N) ]
-    x   = np.asarray(x)
+    x   = [ torch.linspace(edges[n], edges[n+1], Npt + 1, device=device) for n in range (N) ]
+    x   = torch.stack(x)
     s   = x.shape
     z   = func( x.flatten() ).reshape(s)
 
     for n in range(N):
-        t[n] = np.trapz( z[n], dx = 1. / Npt)
+        t[n] = torch.trapz( z[n], dx = 1. / Npt)
 
     return t
 
@@ -45,7 +46,7 @@ def gsPlot(*fargs, **fkw):
             fname = kwargs.pop("fname", None)
             pdf   = kwargs.pop("pdf", None)
 
-            print fname
+            print(fname)
 
             fig = plt.figure()
             gs  = gridspec.GridSpec(*fargs, **fkw)
@@ -75,7 +76,8 @@ def cutflow(fig, gs, cutflow):
     ax  = [ plt.subplot(g) for g in gs ]
 
     cut, yld = zip(*cutflow)
-    cuty     = np.arange(len(cut))[::-1]
+    yld = [y.cpu() for y in yld]
+    cuty     = torch.flip(torch.arange(len(cut), device=device), [0])
     bar      = ax[0].barh(cuty, yld, align='center', alpha=0.5)
 
     fig.suptitle ('Cutflow')
@@ -99,22 +101,22 @@ def scan(fig, gs, L, A, LLH, LBest, Ld, Ad, fin, maxZ=200, points=False):
     ax  = [ plt.subplot(g) for g in gs ]
 
     # interpolate between data points for contouring
-    triI   = tri.Triangulation(L.flatten(), A.flatten())
+    triI   = tri.Triangulation(L.cpu().flatten(), A.cpu().flatten())
     ref    = tri.UniformTriRefiner(triI)
 
-    dLLH   = np.minimum(LLH - LBest, 1.5*maxZ)
+    dLLH   = torch.minimum(LLH - LBest, torch.ones_like(LLH) * 1.5*maxZ).cpu()
     triO   = ref.refine_field(dLLH.flatten(), subdiv=3)
 
     cmap   = cm.get_cmap(name='terrain', lut=None)
-    levels = np.linspace(0, maxZ, 51)
+    levels = torch.linspace(0, maxZ, 51)
     colors = [ '0.00', '0.25', '0.25', '0.25', '0.25']
     lws    = [   0.40,   0.25,   0.25,   0.25,   0.25]
 
     Csf    = ax[0].tricontourf(*triO, levels=levels, cmap=cmap)
     Cs     = ax[0].tricontour (*triO, levels=levels, colors=colors, linewidths=lws)
     if points:
-        sca = ax[0].scatter(L,  A,  marker='.', s= 1.0, color='k', label="Scan Point")
-    sca2   = ax[0].scatter(Ld, Ad, marker='o', s=20.0, color='r', label="Initial", zorder=10)
+        sca = ax[0].scatter(L.cpu(),  A.cpu(),  marker='.', s= 1.0, color='k', label="Scan Point")
+    sca2   = ax[0].scatter(Ld.cpu(), Ad.cpu(), marker='o', s=20.0, color='r', label="Initial", zorder=10)
     sca3   = ax[0].scatter(*fin,   marker='x', s=35.0, color='r', label="Final",   zorder=10)
 
     fig.colorbar(Csf, ticks=levels[::5], cax=ax[1])
@@ -143,22 +145,22 @@ def fit(fig, gs, D, **kwargs):
 
     # Get some bin-derived quantities
     ctr      = (Bins[1:] + Bins[:-1])/2
-    wd       = np.diff(Bins)
+    wd       = torch.diff(Bins)
     rn       = (Bins[0], Bins[-1])
 
-    h, _     = np.histogram(D.x, bins=Bins, range=rn, weights=D.w)
-    h       *= D.Nint / wd
-    t        = np.linspace(rn[0], rn[1], 50*len(Bins))
-    err      = np.sqrt(h*wd, dtype=np.double)/wd
+    h, _     = torch.histogram(D.x.cpu(), Bins.cpu(), weight=D.w.cpu())
+    h       *= D.Nint.cpu() / wd.cpu()
+    t        = torch.linspace(rn[0], rn[1], 50*len(Bins), device=device)
+    err      = torch.sqrt(h*wd)/wd
 
     # Make fit comparison
-    tb       = D.Nint * _integrate(D.TestB, Bins)
+    tb       = D.Nint.cpu() * _integrate(D.TestB, Bins).cpu()
     ts=0
     if len(D.GetActive()) > 0:
-        ts       = D.Nint * _integrate(D.TestS, Bins)
-        res      = (h*wd - ts*wd)/np.sqrt(ts*wd)
+        ts       = D.Nint.cpu() * _integrate(D.TestS, Bins).cpu()
+        res      = (h*wd - ts*wd)/torch.sqrt(ts*wd)
     else:
-        res      = (h*wd - tb*wd)/np.sqrt(tb*wd)
+        res      = (h*wd - tb*wd)/torch.sqrt(tb*wd)
 
     # Histogram and fit
     if Style == "bar":
@@ -166,11 +168,11 @@ def fit(fig, gs, D, **kwargs):
     elif Style == "errorbar":
         ax[0].errorbar(ctr, h, xerr=wd/2, yerr=err, label='Data', color='k', fmt='o')
     else:
-        print "Style key must be 'bar' or 'errorbar'."
+        print("Style key must be 'bar' or 'errorbar'.")
 
-    ax[0].plot(t, D.Nint*D.TestB(t), ls='--', color='red', label='Background', zorder=10)
+    ax[0].plot(t, (D.Nint*D.TestB(t)).cpu(), ls='--', color='red', label='Background', zorder=10)
     if len(D.GetActive()) > 0:
-        ax[0].plot(t, D.Nint*D.TestS(t), ls='-',  color='red',   label='Signal+Bkg', zorder=10)
+        ax[0].plot(t, (D.Nint*D.TestS(t)).cpu(), ls='-',  color='red',   label='Signal+Bkg', zorder=10)
     ax[0].legend()
     ax[0].yaxis.grid(ls=':')
     ax[0].set_ylabel(YLabel)
@@ -184,9 +186,9 @@ def fit(fig, gs, D, **kwargs):
     elif Style == "errorbar":
         ax[1].errorbar (ctr, h-tb, xerr=wd/2, yerr=err, color='k', fmt='o')
     else:
-        print "Style key must be 'bar' or 'errorbar'."
+        print("Style key must be 'bar' or 'errorbar'.")
 
-    ax[1].plot(t, np.zeros_like(t), ls='--', color='red')
+    ax[1].plot(t, torch.zeros_like(t, device=device), ls='--', color='red')
     if len(D.GetActive()) > 0:
         ax[1].plot(t, D.Nint*(D.TestS(t) - D.TestB(t)), ls='-', color='red', zorder=10)
     ax[1].ticklabel_format(style='sci', axis='y', scilimits=(-2,2))
@@ -218,22 +220,24 @@ def fit(fig, gs, D, **kwargs):
 def pull(fig, gs, data, res):
     ax          = [ plt.subplot(g) for g in gs ]
 
-    kres        = np.compress(data > 20, np.nan_to_num(res))
-    hist, edges = np.histogram(kres, bins=np.linspace(-5, 5, 21))
+    nan_mask      = torch.isnan(res)
+    res[nan_mask] = float('inf')
+    kres        = res[data > 20]
+    hist, edges = torch.histogram(kres, bins=torch.linspace(-5, 5, 21, device=device))
     centers     = (edges[1:] + edges[:-1])/2
 
-    nrm         = np.random.normal(size=20*len(kres))
+    nrm         = torch.rand(size=(20*kres.numel(),))
     ks_p        = ks_2samp(nrm, kres)[1] if len(kres) > 0 else 1.0
 
     fig.suptitle("Pull Distribution (Bins with $>20$ Events)")
     ax[0].set_xlabel(r'Deviation ($\sigma$)')
     ax[0].set_ylabel("Number of Bins")
-    ax[0].bar     (centers, hist, width=np.diff(edges), label='Bin Residuals \n $p=%.2g$ (KS)' % ks_p)
-    ax[0].errorbar(centers, hist, yerr=np.sqrt(hist), color='k', fmt='o')
+    ax[0].bar     (centers, hist, width=torch.diff(edges), label='Bin Residuals \n $p=%.2g$ (KS)' % ks_p)
+    ax[0].errorbar(centers, hist, yerr=torch.sqrt(hist), color='k', fmt='o')
     ax[0].set_xlim(-5, 5)
 
-    t = np.linspace(-5, 5, 201)
-    n = np.exp( -0.5*t**2 ) / sqrt(2*pi)
+    t = torch.linspace(-5, 5, 201, device=device)
+    n = torch.exp( -0.5*t**2 ) / sqrt(2*pi)
     ax[0].plot(t, 0.5*n*hist.sum(), lw=1.5, color='b', label=r'Standard Normal')
     ax[0].legend()
 
@@ -252,12 +256,12 @@ def estimators(fig, gs, D, **kwargs):
     YLabel  = kwargs.get("YLabel", "Arbitrary Units")
     LogX    = kwargs.get("LogX",   True)
 
-    t       = np.linspace(Range[0], Range[1], 1001)
+    t       = torch.linspace(Range[0], Range[1], 1001, device=device)
 
     ax[0].plot(t, 0*t, lw=0.75, color='k')
     for sigName in Signals:
        eName = sigName.replace('%', '\%')
-       M     = np.zeros_like(D[sigName].Sig)
+       M     = torch.zeros_like(D[sigName].Sig, device=device)
 
        if "Signal" in Draw:
            M[:]    = D[sigName].Sig
@@ -287,9 +291,9 @@ def estimators(fig, gs, D, **kwargs):
 def moments(fig, gs, D, **kwargs):
     def _bplot(a, x, y, label, style, Num, n):
         if style == "line":
-            a.plot(x, y**2, label=label)
+            a.plot(x.cpu(), (y**2).cpu(), label=label)
         elif style == "bar":
-            a.bar (Num*x + n, y**2, label=label, lw=0)
+            a.bar ((Num*x + n).cpu(), (y**2).cpu(), label=label, lw=0)
 
     ax         = [ plt.subplot(g) for g in gs ]
 
@@ -305,7 +309,7 @@ def moments(fig, gs, D, **kwargs):
     LogX       = kwargs.get("LogX",   True)
     LogY       = kwargs.get("LogY",   True)
 
-    ctr        = np.arange(*Range)
+    ctr        = torch.arange(*Range, device=device)
     Num        = 2 + len(Draw) * len(Signals)
 
     _bplot( ax[0], ctr, D.Mom[ctr], "Data", Style, Num, 0)
@@ -313,7 +317,7 @@ def moments(fig, gs, D, **kwargs):
 
     for sigName in Signals:
         eName = sigName.replace('%', '\%')
-        M     = np.zeros_like(D[sigName].Sig)
+        M     = torch.zeros_like(D[sigName].Sig, device=device)
 
         if "Signal" in Draw:
             M[:] = D[sigName].Sig
@@ -339,11 +343,11 @@ def moments(fig, gs, D, **kwargs):
     if LogY:
         ax[0].set_yscale('log')
     if Style == "bar":
-        tnum = (int(Range[1]) / 8) * np.arange(9)
+        tnum = (int(Range[1]) / 8) * torch.arange(9, device=device)
         ax[0].set_xticks     ( [(x*Num + Num/2) for x in tnum ])
         ax[0].set_xticklabels( [str(x)          for x in tnum ])
     elif Style == "line":
-        tnum = (int(Range[1]) / 8) * np.arange(9)
+        tnum = (int(Range[1]) / 8) * torch.arange(9, device=device)
         ax[0].set_xticks     ( [x               for x in tnum ])
         ax[0].set_xticklabels( [str(x)          for x in tnum ])
 
@@ -369,9 +373,9 @@ def mass_scan(fig, gs, scan, **kwargs):
     keep   = { n: (x.Mass > XRange[0])*(x.Mass < XRange[1]) for n, x in scan.items() }
 
     sigmax =   max([x[keep[name]].max() for name, x in sig.items()])
-    zero   = np.asarray((0,0))
+    zero   = torch.asarray((0,0), device=device)
 
-    cmap   = [ plt.get_cmap(CMap)(i) for i in np.linspace(0, 1, len(Scans)) ]
+    cmap   = [ plt.get_cmap(CMap)(i) for i in torch.linspace(0, 1, len(Scans), device=device) ]
 
     # Limits
     for c, name in zip(cmap, Scans):
@@ -403,7 +407,7 @@ def mass_scan(fig, gs, scan, **kwargs):
     ax[1].set_ylim(-3, 3)
 
     # p-value
-    for n in np.arange( 1, ceil(sigmax) + 1 ):
+    for n in torch.arange( 1, ceil(sigmax) + 1, device=device ):
         t = 1.001*XRange[1] - 0.001*XRange[0]
         ax[2].plot(XRange, zero + _cdf(n), ls=':', lw=0.5,color='k')
         ax[2].text(t, _cdf(n), '$%d\sigma$' % n, va='center')

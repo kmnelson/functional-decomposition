@@ -64,7 +64,7 @@ def pini(str, interval = 1):
     if not _verbose: return
     
     str = _str_bl % str
-    print(str)
+    print(str, end='')
     sys.stdout.flush()
     _Ndot = 0
     _Nint = interval
@@ -105,7 +105,7 @@ def pend(str=""):
 
     if q > 0 and q % _Ngap == 0:
         return
-    print(_str_set % loc)
+    print(_str_set % loc, end='')
     print("%s (%.2fs)" % (str, time.time() - _Ti))
     _Nline += 1
 
@@ -116,7 +116,7 @@ def prst():
     if not _verbose: return
     if _Nline == 0:  return
     print('\x1b[%dF' % _Nline,)
-    _Nline = 0
+    _Nline = 1
 
 def pstage(str):
   def decorator(func):

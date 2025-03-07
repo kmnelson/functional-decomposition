@@ -1,5 +1,6 @@
 *.pyc
 data/ele-cache-*
+data/*.pt
 condor
 *~
 

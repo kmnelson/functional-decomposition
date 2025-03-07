@@ -1,4 +1,5 @@
 import torch
+import math
 import Tools.CacheMgr      as Cache
 
 from   Tools.PrintMgr      import *
@@ -6,8 +7,9 @@ from   Tools.Base          import ParametricObject
 from   scipy.optimize      import minimize
 from   torch.linalg        import solve
 from   torch.linalg        import slogdet, multi_dot
-from   torch.linalg        import cholesky, cholesky_solve
-from   math                import pi, e, sqrt
+from   torch.linalg        import cholesky
+from   torch               import cholesky_solve
+from   math                import pi, sqrt, log
 from   torch.special       import erfinv, gammaln, gammainc, gammaincc
 from   scipy.stats         import norm
 
@@ -21,7 +23,7 @@ class SignalScan(ParametricObject):
     _siglevels = [0.022750, 0.158655, 0.5, 0.841345, 0.977250]
 
     # Get the background and signal variance contributions
-    @Cache.Element("{self.Factory.CacheDir}", "var", "{self.Factory}", "{self.DataSet}", "{self.SigName}.npy")
+    @Cache.Element("{self.Factory.CacheDir}", "var", "{self.Factory}", "{self.DataSet}", "{self.SigName}.pt")
     def _varCache(self, DataMom, SigMoms, P, Rs):
         n      = self.DataSet.N
         P1     = P[-1]
@@ -186,6 +188,7 @@ class SignalScan(ParametricObject):
 class Optimizer(ParametricObject):
     # Transform the dataset to the specified hyperparameters
     def UpdateXfrm(self, reduced=True, **kwargs):
+
         self.update( kwargs )
         self.PriorGen.update(self.ParamVal)
         self.Prior.FromIter(self.PriorGen)
@@ -195,6 +198,7 @@ class Optimizer(ParametricObject):
         inm        = [ self.DataSet[name].Mom for name in Act ]
         outm       = self.Xfrm(self.DataSet.Mom, *inm, **self.ParamVal)
         Mom, sigs  = outm[0], outm[1:]
+        Mom.to(dtype=self.DataSet.Mom.dtype)
 
         for name, m in zip(Act, sigs):
             self.DataSet[name].MomX[len(m):] = 0
@@ -206,7 +210,7 @@ class Optimizer(ParametricObject):
     # Scan for the optimal number of moments.
     @Cache.Element("{self.Factory.CacheDir}", "LLH", "{self.Factory}", "{self}", "{self.DataSet}.json")
     def ScanN(self, reduced=True, **kwargs):
-        L  = torch.full((self.Factory["Ncheck"],), float('inf'), device=self['device'])
+        L  = torch.full((self.Factory["Ncheck"],), torch.finfo(self.DataSet.Full.Mom.dtype).max, device=self['device'])
         D  = self.DataSet
         a  = kwargs.get("attr", "MomX")
         h  = D.Full.Mom[1] * sqrt(2)
@@ -219,24 +223,24 @@ class Optimizer(ParametricObject):
 
                 dof  = (j**2 + j) / 2
                 Raw  = D.TestS.LogP(D.Full)
-                Pen  = float(j) * torch.log(D.Nint/(dof*h*e)) / 2
-
+                Pen  = float(j) * torch.log(D.Nint/(dof*h*math.e)) / 2
                 pdot()
-            except (torch.linalg.LinAlgError, ValueError):
+            except (torch.linalg.LinAlgError, ValueError) as e:
                 pdot(pchar="x")
                 continue
             L[j] = Raw + Pen
 
         nan_mask = torch.isnan(L)
-        L[nan_mask] = float('inf')
+        L[nan_mask] = torch.finfo(L.dtype).max
         j = torch.argmin(L)
 
-        return j, L[j]
+        return int(j.item()), float(L[j].item()) # format for save in Cache.Element json
 
     # Optimize the hyperparameters
     @pstage("Optimizing Hyperparameters")
-    def FitW(self, initial_simplex=None):
-        ini = [ self.Factory[p] for p in self.Factory._fitparam ]
+    def FitW(self, initial_simplex=None, bounds=None):
+        ini = [ self.Factory[p].item() for p in self.Factory._fitparam ]
+        self.bounds = bounds
         res = minimize(self.ObjFunc, ini, method='Nelder-Mead', options={'xatol': 1e-2, 'initial_simplex' : initial_simplex})
         par = dict(zip(self.Factory._fitparam, res.x))
 
@@ -245,6 +249,7 @@ class Optimizer(ParametricObject):
         self.UpdateXfrm()
         
         N, L = self.ScanN()
+        self.bounds = None
 
         return N, L, par
 
@@ -266,7 +271,7 @@ class Optimizer(ParametricObject):
         LLH = torch.tensor(LLH)
 
         nan_mask = torch.isnan(LLH)
-        LLH[nan_mask] = float('inf')
+        LLH[nan_mask] = torch.finfo(LLH.dtype).max
         
         return LLH.reshape(Ax.shape), P[ torch.argmin(LLH) ]
 
@@ -289,23 +294,32 @@ class Optimizer(ParametricObject):
 
         self.Nfev += 1
 
-        return L
+        # check if in bounds and apply extreme penalty if not
+        penalty_bounds = 0
+        if self.bounds:
+            for a, b in zip(arg, self.bounds):
+                if a < b[0] or a > b[1]:
+                    penalty_bounds = float('inf')
+
+        return L + penalty_bounds
 
     def __init__(self, Factory, DataSet, **kwargs):
         self.DataSet   = DataSet
         self.Factory   = Factory
         self.Nfev      = 0
         self.Nfex      = 0
-        self['device'] = Factory['device']
 
         # Copy parameters from the Factory object.
         self._param    = Factory._fitparam
         self._fitparam = Factory._fitparam
         ParametricObject.__init__(self, **Factory.ParamVal)
+        self['device'] = Factory['device']
 
         self.Prior     = TruncatedSeries(self.Factory, torch.zeros((Factory["Nbasis"],), device=self['device']), DataSet.Neff/DataSet.Nint, Nmax=2 )
         self.PriorGen  = Factory.Pri()
         self.Xfrm      = self.Factory.Xfrm()
+
+        self.bounds = None
 
 ###
 ## An object to hold data to decompose along with signal objects.
@@ -338,7 +352,7 @@ class DataSet(ParametricObject):
         self.Mom      = torch.zeros((self.Factory["Nbasis"],), device=self['device'])
         self.MomX     = torch.zeros((self.Factory["Nxfrm"],), device=self['device'])
 
-        self.Mom[:Nb] = self.Factory.CachedDecompose(self.x, self.w, str(self.uid), cksize=cksize, Nbasis=Nb)
+        self.Mom[:Nb] = self.Factory.CachedDecompose(self.x, self.w, str(float(self.uid)), cksize=cksize, Nbasis=Nb)
 
         self.Full     = TruncatedSeries(self.Factory, self.Mom, self.Neff, Nmax=N )
         self.TestS    = TruncatedSeries(self.Factory, self.Mom, self.Neff, Nmax=N )
@@ -421,7 +435,7 @@ class DataSet(ParametricObject):
     def SetN(self, N, attr="MomX"):
         self.N = N
         Mom    = getattr(self, attr)
-        isSig  = torch.arange(Mom.size, device=self['device']) >= N
+        isSig  = torch.arange(Mom.numel(), device=self['device']) >= N
         dMom   = Mom * (~isSig)
 
         self.attr = attr
@@ -436,11 +450,10 @@ class DataSet(ParametricObject):
         self.TestS.Set(Mom=dMom + self.FullSig * ( isSig) )
 
     def __init__(self, x, Factory, **kwargs):
-        self['device'] = Factory['device']
-        w              = kwargs.get('w', torch.ones(x.shape[-1], device=self['device']))
+        w              = kwargs.get('w', torch.ones(x.shape[-1], device=Factory['device']))
         sel            = (w != 0)
-        self.w         = torch.masked_select(sel, w)
-        self.x         = torch.masked_select(sel, x)
+        self.w         = torch.masked_select(w, sel)
+        self.x         = torch.masked_select(x, sel)
 
         # Record some vital stats
         self.uid       = torch.dot(self.x, self.w)  # Use the weighted sum as a datset identifier.
@@ -452,12 +465,14 @@ class DataSet(ParametricObject):
         self.Signals   = []
 
         ParametricObject.__init__(self, **Factory.ParamVal)
+        self['device'] = Factory['device']
+
 
     # Format as a list of floats joined by '_'.  The
     #  str(float()) construction ensures that numpy
-    #  singletons are p.copy()rinted consistently
+    #  singletons are printed consistently
     def __format__(self, fmt):
-        id_str = [ str(self.uid) ] + self.GetActive()
+        id_str = [ str(float(self.uid)) ] + self.GetActive()
         return "_".join( id_str )
 
 ###
@@ -471,7 +486,7 @@ class ParametricSignal(object):
         self.MomX[:]        = 0
 
     # Decompose the signal sample data.
-    @Cache.Element("{self.Factory.CacheDir}", "Decompositions", "{self.Factory}", "{self.name}.npy")
+    @Cache.Element("{self.Factory.CacheDir}", "Decompositions", "{self.Factory}", "{self.name}.pt")
     def CachedDecompose(self, cksize=2**20, **kwargs):
         Nb           = kwargs.pop("Nbasis", 0)
         Mom          = torch.zeros((self.Factory["Nbasis"],), device=self['device'])
@@ -529,6 +544,7 @@ class ParametricSignal(object):
 class TruncatedSeries(object):
     # Evaluate series
     def __call__(self, x, trunc=False):
+        x = x.to(self.Factory['device'])        
         Mom      = self.MomAct if trunc else self.MomU
         Val      = torch.zeros_like(x, device=x.device)
         w        = torch.ones_like(x, device=x.device)
@@ -541,8 +557,8 @@ class TruncatedSeries(object):
 
     # Get the common index range between self and other
     def _ci(self, othr):
-        return ( max(self.Nmin, othr.Nmin),
-                 min(self.Nmax, othr.Nmax))
+        return ( int(max(self.Nmin, othr.Nmin)),
+                 int(min(self.Nmax, othr.Nmax)))
 
     # Get the entropy of this TruncatedSeries.
     def Entropy(self):
@@ -560,9 +576,9 @@ class TruncatedSeries(object):
         k           = min(k, self.Ncov/2, othr.Ncov/2)
         delta       = self.MomAct[j:k] - othr.MomAct[j:k]
 
-        ChSelf      = cho_factor(self.Cov[j:k,j:k])
-        h           = cho_solve(ChSelf, delta)
-        r           = cho_solve(ChSelf, othr.Cov[j:k,j:k])
+        ChSelf      = cholesky(self.Cov[j:k,j:k])
+        h           = cholesky_solve(delta, ChSelf)
+        r           = cholesky_solve(othr.Cov[j:k,j:k], ChSelf)
 
         return (torch.trace(r) + torch.dot(delta, h) - slogdet(r)[1] - k + j) / 2
 
@@ -572,39 +588,55 @@ class TruncatedSeries(object):
         k           = min(k, self.Ncov/2)
         delta       = self.MomAct[j:k] - othr.MomAct[j:k]
 
-        Ch          = cho_factor(self.Cov[j:k,j:k])
-        h           = cho_solve(Ch, delta)
+        Ch          = cholesky(self.Cov[j:k,j:k])
+        h           = cholesky_solve(delta, Ch)
 
         return torch.dot(delta, h) / 2
 
     # Negative log-likelihood of othr with respect to self.
     def LogP(self, othr):
         j, k        = self._ci(othr)
-        k           = min(k, self.Ncov/2)
-        delta       = self.MomAct[j:k] - othr.MomAct[j:k]
+        k           = int(min(k, self.Ncov/2))
+        delta       = (self.MomAct[j:k] - othr.MomAct[j:k]).unsqueeze(-1)
 
-        Ch          = cho_factor(self.Cov[j:k,j:k])
-        h           = cho_solve(Ch, delta)
-        l           = 2*torch.log(torch.diag(Ch[0])).sum()
+        '''
+        L, Q = torch.linalg.eigh((self.Cov[j:k,j:k] + self.Cov[j:k,j:k].T)/2)
+        offset = torch.eye(k-j, device=self.Cov.device)
+        if torch.min(L) < 0:
+            offset *= torch.abs(torch.min(L) * 1.01)
+        else:
+            offset *= 0
+        
+        # ensure symmetry (Cov + Cov.T)/2 to avoid float precision errors
+        Ch          = cholesky((self.Cov[j:k,j:k] + self.Cov[j:k,j:k].T)/2 + offset)
+        '''
+        Ch          = cholesky((self.Cov[j:k,j:k] + self.Cov[j:k,j:k].T)/2)
+        #'''
+        h           = cholesky_solve(delta, Ch)
+        l           = 2*torch.sum(torch.log(torch.diag(Ch)))
 
-        return (  (k-j)*torch.log(2*pi) + l + torch.dot(delta, h)) / 2
+        return (  (k-j)*log(2*pi) + l + torch.matmul(torch.transpose(delta, 0, 1), h)) / 2
 
     # Set the number of active moments.
     def Set(self, **kwargs):
         self.Nmin   = kwargs.get('Nmin', self.Nmin)
         self.Nmax   = kwargs.get('Nmax', self.Nmax)
-        self.Mom    = kwargs.get('Mom',  self.Mom).copy()
-        Ncov        = self.Mom.size
+        self.Mom    = kwargs.get('Mom',  self.Mom).clone().detach().to(self.Factory['device'])
+        Ncov        = self.Mom.numel()
 
         # Truncate or pad with zeros as necessary.  Keep a copy of the original.
-        self.MomU = self.Mom.copy()
-        self.Mom.resize( (self.Factory["Nbasis"],), )
+        self.MomU = self.Mom.clone().detach().to(self.Factory['device'])
+        if self.Mom.numel() == self.Factory["Nbasis"]:
+            self.Mom.reshape( (self.Factory["Nbasis"],) )
+        else:
+            self.Mom = torch.cat([self.Mom, torch.zeros(self.Factory["Nbasis"]-self.Mom.numel(), dtype=self.Mom.dtype, device=self.Mom.device)])
 
-        R           = torch.arange(self.Mom.size)
+        R           = torch.arange(self.Mom.numel(), device=self.Factory['device'])
         self.MomAct = self.Mom * (self.Nmin <= R) * (R < self.Nmax)
 
         # Build covariance matrix
         N           = self.Cov.shape[0]
+
         self.Mx     = self.Factory.MomMx( self.Mom, self.Nmin, self.Nmax, out=self.Mx)
         self.Cov    = (self.Mx - torch.outer(self.MomAct[:N], self.MomAct[:N])) / self.StatPre
         self.Ncov   = Ncov

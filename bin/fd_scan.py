@@ -1,10 +1,11 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-import os, sys, signal, argparse, ConfigParser
-import numpy                           as np
+import os, sys, signal, argparse, configparser
+import torch
 import matplotlib.pyplot               as plt
 import Plots.Plots                     as Plots
 
+from   scipy.optimize                  import Bounds
 from   Tools.Decomp                    import DataSet, Optimizer, SignalScan
 from   Tools.OrthExp                   import ExpDecompFactory
 from   Tools.ConfigIter                import ConfigIter
@@ -13,12 +14,14 @@ from   Plots.Plots                     import *
 
 from   matplotlib.backends.backend_pdf import PdfPages
 
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
 # Load a specified variable from base dir
 def loadVar(varName, DSList, Dec):
-    Path = [ os.path.join(ArgC.base, "Data", n, varName + ".npy") for n in DSList ]
-    Ar   = [ np.load(p, mmap_mode = 'r')[::int(d)] for p, d in zip(Path, Dec) ]
+    Path = [ os.path.join(ArgC.base, "Data", n, varName + ".pt") for n in DSList ]
+    Ar   = [ torch.load(p)[::int(d)] for p, d in zip(Path, Dec) ]
 
-    return np.concatenate(Ar)
+    return torch.concatenate(Ar)
 
 # Test a condition on on cached variables
 def testVar(cond, DSList, Dec):
@@ -27,11 +30,11 @@ def testVar(cond, DSList, Dec):
     for n, d in zip(DSList, Dec):
         Path  = os.path.join ( ArgC.base, "Data", n )
         Names = [ os.path.splitext(k)[0] for k in os.listdir ( Path ) ]
-        Full  = { k : os.path.join(Path, k + ".npy") for k in Names }
-        Vars  = { k : np.load(Full[k], mmap_mode = 'r')[::int(d)] for k in Names }
+        Full  = { k : os.path.join(Path, k + ".pt") for k in Names }
+        Vars  = { k : torch.load(Full[k])[::int(d)] for k in Names }
 
         Keep.append(eval(cond, Vars))
-    return np.concatenate(Keep)
+    return torch.concatenate(Keep)
 
 # Evaluate a signal function string.
 def _fmtSignalFunc(x, **kwargs):
@@ -56,7 +59,7 @@ def nice_quit(signal, frame):
 signal.signal(signal.SIGINT, nice_quit)
 
 # Lower default NP print precision.
-np.set_printoptions(precision=4)
+torch.set_printoptions(precision=4)
 
 ######
 # Parse command line parameters and config files
@@ -66,7 +69,7 @@ ArgP.add_argument('--base', type=str, default=".", help="FD base directory.")
 ArgP.add_argument('--show', action="store_true",   help="Display plots interactively.")
 ArgC      = ArgP.parse_args()
 
-Config    = ConfigParser.ConfigParser()
+Config    = configparser.ConfigParser()
 Config.optionxform = str
 Config.read( os.path.join(ArgC.base, "base.conf") )
 
@@ -75,7 +78,7 @@ try:            plt.style.use( PlotStyle )
 except IOError: plt.style.use( os.path.join(ArgC.base, PlotStyle) )
 
 # Reduce numpy default print precision to make logs a bit neater.
-np.set_printoptions(precision=2)
+torch.set_printoptions(precision=2)
 
 
 
@@ -98,29 +101,30 @@ for param, r in zip(ExpDecompFactory._fitparam, rcomp) :
     step_x = float(r[2])
     step_d = float(r[3]) if len(r) > 3 else 1
 
-    dcmp   = np.linspace (start,     stop, step_d)
-    xidx   = np.linspace (    0, step_d-1, step_x)
-    xfrm_r = np.linspace (start,     stop, step_x)
+    dcmp   = torch.linspace (start,     stop, int(step_d), device=device)
+    xidx   = torch.linspace (    0, step_d-1, int(step_x), device=device)
+    xfrm_r = torch.linspace (start,     stop, int(step_x), device=device)
 
     if param == 'Alpha':
-        dcmp_idx = np.round(xidx-0.5, 0).astype(int)
+        dcmp_idx = torch.round(xidx-0.5).type(torch.int32)
     elif param == 'Lambda':
-        dcmp_idx = np.round(xidx+0.5, 0).astype(int)
+        dcmp_idx = torch.round(xidx+0.5).type(torch.int32)
 
-    dcmp_idx = np.clip(dcmp_idx, 0, dcmp.size-1)
+    dcmp_idx = torch.clip(dcmp_idx, 0, torch.numel(dcmp)-1)
     dcmp_r   = dcmp[ dcmp_idx ]
 
     rlist_xfrm.append( xfrm_r )
     rlist_dcmp.append( dcmp_r )
 
-Ax, Lx    = np.meshgrid(*rlist_xfrm)
-Ad, Ld    = np.meshgrid(*rlist_dcmp)
+Ax, Lx    = torch.meshgrid(*rlist_xfrm, indexing='xy')
+Ad, Ld    = torch.meshgrid(*rlist_dcmp, indexing='xy')
 
 # Create Factory configuration
 fConf     = { k: eval(v) for k, v in Config.items('ExpDecompFactory') }
 for p, r in zip(ExpDecompFactory._fitparam, rlist_dcmp):
     fConf[p] = r[0]
 fConf['CacheDir'] = os.path.join(ArgC.base, "Cache")
+fConf['device'] = device
 
 # Read input variables.
 SetList   = Config.items("InputFiles")
@@ -129,21 +133,21 @@ General   = { p: r for p, r in Config.items("General") }
 varName   = General.get("Variable")
 wgtName   = General.get("Weight")
 Scale     = General.get("Scale")
-Lumi      = General.get("Lumi",      0.0)
-LumiUnc   = General.get("LumiUnc",   0.0)
+Lumi      = float(General.get("Lumi",      0.0))
+LumiUnc   = float(General.get("LumiUnc",   0.0))
 XSecUnits = General.get("XSecUnits") if Lumi > 0 else "Events"
 NumOpt    = General.get("NumOptSteps", 1)
 
-print
-print
-print "Input files:", " ".join( [n for n, d in SetList] )
+print()
+print()
+print("Input files:", " ".join( [n for n, d in SetList] ))
 
-x       = loadVar(varName, *zip(*SetList))
-w       = loadVar(wgtName, *zip(*SetList)) * float(Scale)
+x       = loadVar(varName, *zip(*SetList)).to(device)
+w       = loadVar(wgtName, *zip(*SetList)).to(device) * float(Scale)
 cutflow = [ ("Initial", w.sum()) ]
 
 for name, cond in Config.items("Cuts"):
-    w *= testVar(cond, *zip(*SetList))
+    w *= testVar(cond, *zip(*SetList)).to(device)
     cutflow.append((name, w.sum()))
 
 # Create objects
@@ -168,7 +172,7 @@ for c, name in ConfigIter(Config, "ParametricSignal", "ParametricSignalDefault")
        for M, fname in zip( Scan, Names[name] ):
            _addSignalFunc(D, func, fname, M, **c)
 
-print
+print()
 
 ######
 # Decompose
@@ -180,12 +184,14 @@ dL         = Lx[1,0] - Lx[0,0]
 for _ in range(1):
     Ab     = PBest['Alpha']
     Lb     = PBest['Lambda']
-    ini    = np.asarray( [ (Ab-dA, Lb-dL), (Ab-dA, Lb+dL), (Ab+dA, Lb) ] )
+    ini    = torch.tensor( [ (Ab-dA, Lb-dL), (Ab-dA, Lb+dL), (Ab+dA, Lb) ] )
 
     Factory.update( PBest )
     D.Decompose(xonly=True)
 
-    NBest, LBest, PBest = FOpt.FitW( initial_simplex = ini)
+    NBest, LBest, PBest = FOpt.FitW( initial_simplex = ini, 
+                                     bounds=[[(Ab-dA*2).item(), (Ab+dA*2).item()], 
+                                             [(Lb-dL*2).item(), (Lb+dL*2).item()]])
 
 ### Re-decompose with the full expansion and extract signals.
 Factory.update( PBest)
@@ -207,13 +213,13 @@ fmt = {
 }
 lfmt = [ "red", "yel", "grn", "wht", "grn", "yel", "red" ]
 
-print
-print
-print "=====> YIELD AND LIMITS <====="
-print
-print "%-16s: %8s +- %8s (%5s) [ %9s  ] [ %9s  %9s  %9s  %9s  %9s  ]" % (
+print()
+print()
+print("=====> YIELD AND LIMITS <=====")
+print()
+print("%-16s: %8s +- %8s (%5s) [ %9s  ] [ %9s  %9s  %9s  %9s  %9s  ]" % (
        "Signal", "Yield", "Unc", "Sig.", "Obs. CL95",
-       "-2sigma", "-1sigma", "Exp. CL95", "+1sigma", "+2sigma")
+       "-2sigma", "-1sigma", "Exp. CL95", "+1sigma", "+2sigma"))
 
 for scan_name, sig_names in Names.items():
     Scans[scan_name] = SignalScan(Factory, D, *sig_names, Lumi=Lumi, LumiUnc=LumiUnc)
@@ -222,13 +228,13 @@ for scan_name, sig_names in Names.items():
     for name, yld, unc, obs, exp in Scans[scan_name]:
         t2   = time.time()
         sig  = yld / unc
-        isig = 3 + np.clip(int(sig) + (1 if sig > 0 else -1), -3, 3)
+        isig = 3 + torch.clip(int(sig) + (1 if sig > 0 else -1), -3, 3)
 
-        print "%-16s: %8.1f +- % 8.1f (% 4.2f)" % (name, yld, unc, sig),
-        print "[", fmt[lfmt[ isig ]] % obs, "] [",
+        print("%-16s: %8.1f +- % 8.1f (% 4.2f)" % (name, yld, unc, sig),)
+        print("[", fmt[lfmt[ isig ]] % obs, "] [",)
         for l, e in zip(lfmt[1:-1], exp):
-            print fmt[l] % e,
-        print "] (%4.2fs)" % (t2-t1)
+            print(fmt[l] % e,)
+        print("] (%4.2fs)" % (t2-t1))
 
         t1 = time.time()
 
@@ -236,46 +242,46 @@ for scan_name, sig_names in Names.items():
 # Output fit results
 ######
 Nxfrm = Factory["Nxfrm"]
-print
-print
-print "=====> CUTFLOW <====="
+print()
+print()
+print("=====> CUTFLOW <=====")
 for c in cutflow:
-    print "% 12s: %.2f" % c
-print
-print
-print "=====> SIGNAL RESULTS <====="
+    print("% 12s: %.2f" % c)
+print()
+print()
+print("=====> SIGNAL RESULTS <=====")
 for name in D.GetActive():
     s = D[name]
-    print "% 12s: %.2f +- %.2f" % (name, s.Yield, s.Unc)
-print
-print
-print "=====> COVARIANCE < ====="
-print D.Cov
-print
-print
-print "=====> CORRELATION < ====="
-print D.Corr
-print
-print
-print "=====> RAW MOMENTS <====="
+    print("% 12s: %.2f +- %.2f" % (name, s.Yield, s.Unc))
+print()
+print()
+print("=====> COVARIANCE < =====")
+print(D.Cov)
+print()
+print()
+print("=====> CORRELATION < =====")
+print(D.Corr)
+print()
+print()
+print("=====> RAW MOMENTS <=====")
 for n in range(33):
-  print "% 3d: %+.3e   " % (n, D.Mom[n]),
-  if n % 4 == 3: print
-print
-print
-print "=====> BACKGROUND COEFFICIENTS <====="
+  print("% 3d: %+.3e   " % (n, D.Mom[n]),)
+  if n % 4 == 3: print()
+print()
+print()
+print("=====> BACKGROUND COEFFICIENTS <=====")
 for n in range(D.N):
-  print "% 3d: %+.3e   " % (n, D.TestB.Mom[n]),
-  if n % 4 == 3: print
-print
-print
+  print("% 3d: %+.3e   " % (n, D.TestB.Mom[n]),)
+  if n % 4 == 3: print()
+print()
+print()
 
 ######
 # Plotting
 ######
-print
-print
-print "=====> PLOTTING < ====="
+print()
+print()
+print("=====> PLOTTING < =====")
 def op(*x):
     return os.path.join(ArgC.base, "Output", *x)
 
@@ -290,7 +296,7 @@ fin = Factory["Lambda"], Factory["Alpha"]
 
 Plots.cutflow (cutflow, pdf=pdf, fname=op('cutflow.pdf'))
 
-if LLH.size > 3:
+if LLH.numel() > 3:
     Plots.scan (Lx, Ax, LLH, LBest, Ld, Ad, fin, pdf=pdf, fname=op('hyperparameter_scan_400.pdf'))
     Plots.scan (Lx, Ax, LLH, LBest, Ld, Ad, fin, pdf=pdf, fname=op('hyperparameter_scan_25.pdf'), maxZ=25)
 
@@ -303,9 +309,9 @@ for p, file in ConfigIter(Config, "Plot", "PlotDefault"):
     try:
         Type = p.pop("Type")
     except KeyError:
-        print "ERROR: Must specify 'Type' key in config for %s.  Valid types are:" % file
-        print "   Fit  (requires keys: 'Bins')"
-        print "   Scan (requires keys: 'Scans')"
+        print("ERROR: Must specify 'Type' key in config for %s.  Valid types are:" % file)
+        print("   Fit  (requires keys: 'Bins')")
+        print("   Scan (requires keys: 'Scans')")
         continue
 
     if Type == "Fit":

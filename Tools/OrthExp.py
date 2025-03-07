@@ -127,7 +127,7 @@ class ExpDecompFn (Base.Basis):
     def Base0 (self, out):      out[:] = 0
     def Base1 (self, out):      out[:] = self['rz']
     def Raise (self, out):      return torch.exp( -(self['x']-self['x0']) * self['xf'] / self['Alpha'], out=out)
-    def Xfrm  (self, out):      return torch.pow((self['Alpha']/self['Lambda']) * ((self['x']-self['x0'])/self['Lambda']), (self['Alpha']-1), out=out)
+    def Xfrm  (self, out):      return (self['Alpha']/self['Lambda']) * torch.pow(((self['x']-self['x0'])/self['Lambda']), (self['Alpha']-1), out=out)
 
     # The recurrence relation itself.
     def Recur(self, 
