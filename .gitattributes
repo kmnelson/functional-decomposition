@@ -1,0 +1,8 @@
+data/xfrm-cache-Alpha-128.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Alpha-256.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Alpha-64.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Alpha-96.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Lambda-128.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Lambda-256.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Lambda-64.pt filter=lfs diff=lfs merge=lfs -text
+data/xfrm-cache-Lambda-96.pt filter=lfs diff=lfs merge=lfs -text
